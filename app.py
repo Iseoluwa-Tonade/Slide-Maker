@@ -296,7 +296,6 @@ def main_app():
             return
 
         # Generate AI Mapping (Cached)
-        # Note: We pass the API key explicitly here to break the cache if the key changes, though st.cache_data is on API key in the function args
         ai_mapping_list = generate_ai_mapping(transcript, presentation_blocks, API_KEY)
         ai_replacements = {item['original_index']: item['new_text'] for item in ai_mapping_list}
 
