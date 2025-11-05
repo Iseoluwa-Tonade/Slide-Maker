@@ -296,6 +296,7 @@ def main_app():
             return
 
         # Generate AI Mapping (Cached)
+        # Note: We pass the API key explicitly here to break the cache if the key changes, though st.cache_data is on API key in the function args
         ai_mapping_list = generate_ai_mapping(transcript, presentation_blocks, API_KEY)
         ai_replacements = {item['original_index']: item['new_text'] for item in ai_mapping_list}
 
@@ -306,7 +307,7 @@ def main_app():
         st.session_state['editing_started'] = True
 
         # Force a rerun to show the editing interface below
-        st.experimental_rerun()
+        st.rerun()
 
     # --- Editing Interface (Runs after analysis is complete) ---
     if 'editing_started' in st.session_state and st.session_state['editing_started']:
