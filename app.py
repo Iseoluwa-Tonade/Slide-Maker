@@ -16,11 +16,12 @@ except ImportError:
     sys.exit()
 
 # --- Configuration ---
-OUTPUT_FILENAME = "edited_text_output.txt"
+OUTPUT_FILENAME = "edited_document" # Base name for download
 
 # --- LLM API Configuration ---
 API_KEY = os.environ.get("GEMINI_API_KEY")
 API_URL_TEXT = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={API_KEY}"
+API_URL_IMAGEN = f"https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-002:predict?key={API_KEY}"
 
 # --- CORE LOGIC FUNCTIONS ---
 
@@ -33,9 +34,17 @@ def call_gemini_api(url, payload):
             response = requests.post(url, headers={'Content-Type': 'application/json'}, data=json.dumps(payload))
             response.raise_for_status()
             result = response.json()
-            if 'candidates' not in result or not result['candidates']: return None
-            text = result['candidates'][0]['content']['parts'][0]['text']
-            return text
+            
+            # Extract text/JSON result from Gemini 2.5 response
+            if 'candidates' in result and result['candidates']:
+                return result['candidates'][0]['content']['parts'][0]['text']
+            
+            # Extract image result from Imagen 3.0 response
+            if 'predictions' in result and result['predictions']:
+                return result['predictions'][0]['bytesBase64Encoded']
+            
+            return None
+
         except requests.exceptions.HTTPError as e:
             st.error(f"API Error (Attempt {attempt + 1}): {e.response.status_code}")
             if attempt < max_retries - 1:
@@ -65,7 +74,6 @@ def extract_text_from_image(image_buffer, mime_type):
     st.info("🧠 AI Vision is reading text from the image...")
     
     base64_image = base64.b64encode(image_buffer).decode('utf-8')
-    
     user_query = "Extract all text present in this image, retaining all original formatting like line breaks and bullet points. Do not add any commentary, only the raw text content."
     
     payload = {
@@ -77,7 +85,6 @@ def extract_text_from_image(image_buffer, mime_type):
         }]
     }
     
-    # We use the text endpoint, but the payload includes image data for vision
     extracted_text = call_gemini_api(API_URL_TEXT, payload)
     
     if extracted_text:
@@ -117,21 +124,45 @@ def generate_ai_suggestions(transcript, extracted_text):
     with st.spinner("Rewriting document content..."):
         return call_gemini_api(API_URL_TEXT, payload)
 
+def generate_edited_image(image_buffer, edited_text):
+    """Uses Imagen to replace text on the original image."""
+    st.info("🎨 Sending original image and edited text to AI for re-rendering...")
+    
+    base64_image = base64.b64encode(image_buffer).decode('utf-8')
+
+    prompt = (
+        f"Based on the input image, replace the existing text with the following new text. "
+        f"Maintain the original image's style, fonts, colors, and layout perfectly. "
+        f"New Content:\n---\n{edited_text}"
+    )
+
+    payload = {
+        "instances": {
+            "prompt": prompt,
+            "image_bytes_base64": base64_image
+        },
+        "parameters": {"sampleCount": 1}
+    }
+
+    # Use call_gemini_api which handles the Imagen endpoint
+    with st.spinner("AI is generating the edited image (this may take up to 30 seconds)..."):
+        return call_gemini_api(API_URL_IMAGEN, payload)
+
 # --- STREAMLIT UI ---
 
 def main_app():
     st.set_page_config(layout="wide", page_title="Document AI Co-Editor")
 
-    st.title("📄 Document AI Co-Editor (Image/PDF)")
-    st.markdown("Upload your document/image, and the AI will extract and rewrite the text based on your transcript.")
+    st.title("📄 AI Image & Document Editor (Re-render Text)")
+    st.markdown("Upload an image or document, and the AI will extract, edit, and re-render the content based on your transcript.")
 
     if not API_KEY:
         st.error("⚠️ **Deployment Error:** The `GEMINI_API_KEY` environment variable is not set. Please configure it.")
 
-    # 1. Inputs: File, Visual Reference Image, and Transcript
+    # 1. Inputs: File and Transcript
     st.subheader("1. Upload Files and Transcript")
     
-    col_file, col_visual = st.columns(2)
+    col_file, col_transcript = st.columns([1, 1])
     
     with col_file:
         uploaded_file = st.file_uploader(
@@ -140,24 +171,16 @@ def main_app():
             key='uploaded_file'
         )
     
-    with col_visual:
-        # User can upload the same file as the reference, or a higher quality screenshot
-        uploaded_image = st.file_uploader(
-            "Upload Visual Reference (For Live Preview)",
-            type=["png", "jpg", "jpeg"],
-            key='uploaded_image',
-            help="Upload a screenshot of the page for live visual context while editing."
+    with col_transcript:
+        transcript = st.text_area(
+            "Paste Meeting Transcript Here",
+            height=200,
+            key='transcript_area'
         )
-
-    transcript = st.text_area(
-        "Paste Meeting Transcript Here",
-        height=200,
-        key='transcript_area'
-    )
 
     st.markdown("---")
     
-    # 2. Execution Button
+    # 2. Execution Button (Start Analysis)
     if st.button("Start Analysis and Editing 🚀", disabled=(not uploaded_file or not transcript or not API_KEY)):
         
         file_buffer = uploaded_file.getvalue()
@@ -170,6 +193,7 @@ def main_app():
         elif file_type in ['image/png', 'image/jpeg']:
             extracted_text = extract_text_from_image(file_buffer, file_type)
             st.session_state['document_type'] = 'Image'
+            st.session_state['original_image_buffer'] = file_buffer # Store buffer for re-render
         else:
             st.error("Unsupported file type.")
             return
@@ -184,49 +208,67 @@ def main_app():
         st.success("Analysis complete. Scroll down to edit.")
         st.rerun()
 
-    # --- Editing Interface (Runs after analysis is complete) ---
+    # --- Editing and Re-rendering Interface ---
     if st.session_state.get('editing_started'):
-        st.subheader("2. Live Visual Reference & Text Editing")
+        st.subheader("2. Text Editing & Visual Re-render")
 
-        col_visual_ref, col_editor = st.columns(2)
+        col_editor, col_visual_output = st.columns([1, 1])
         document_type = st.session_state.get('document_type', 'File')
         
-        # A. Visual Reference (The "Live Preview" replacement)
-        with col_visual_ref:
-            st.info(f"Source Document Type: {document_type}")
-            if uploaded_image:
-                st.image(uploaded_image, caption="Visual Reference (Live Preview)", use_column_width=True)
-            elif uploaded_file and document_type == 'Image':
-                st.image(uploaded_file, caption="Visual Reference (Uploaded Image)", use_column_width=True)
-            else:
-                st.warning("Upload an image for a visual reference.")
-
-        # B. Text Editor
+        # A. Text Editor (User editable area)
         with col_editor:
-            
+            st.info(f"Source Document Type: {document_type}")
             if 'ai_suggestion' in st.session_state:
-                st.success("✅ AI has analyzed the transcript and generated suggested edits.")
+                st.success("✅ AI has generated suggested edits.")
             
-            # Allow user to edit the text
             final_edited_text = st.text_area(
-                "Final Edited Document Text (Review/Modify below):",
+                "Final Edited Text (Review/Modify below):",
                 value=st.session_state['editor_text'],
-                height=600,
+                height=450,
                 key='final_editor'
             )
+            
+            # Update session state text whenever the user types
+            st.session_state['editor_text'] = final_edited_text
+
+        # B. Output Visuals & Re-render Button
+        with col_visual_output:
+            st.warning("Preview/Re-render Area")
+
+            if document_type == 'Image':
+                if st.button("🖼️ Generate Edited Image Output", key='generate_image_button'):
+                    # The image generation function uses the text currently in the editor
+                    image_base64_data = generate_edited_image(
+                        st.session_state['original_image_buffer'], 
+                        final_edited_text
+                    )
+                    
+                    if image_base64_data:
+                        # Display the new image and allow download
+                        image_url = f"data:image/jpeg;base64,{image_base64_data}"
+                        st.image(image_url, caption="AI Re-rendered Image Output", use_column_width=True)
+                        st.download_button(
+                            label="Download Re-rendered Image",
+                            data=base64.b64decode(image_base64_data),
+                            file_name="edited_image_output.jpeg",
+                            mime="image/jpeg"
+                        )
+            
+            elif document_type == 'PDF':
+                st.info("PDF: Output is text only. Please click the button below to download the final edited text.")
+            
+            else:
+                st.warning("No visual output for this file type.")
 
         st.markdown("---")
 
-        # 3. Final Output Button
-        st.subheader("3. Final Output")
+        # 3. Final Text Output (Always available)
+        st.subheader("3. Final Edited Text Output (For Manual Use)")
         
-        st.warning("⚠️ **Important:** The application cannot save the text back into the image. You must use the text file below to manually update your original image/document.")
-        
-        # Download button provides the final text output
         st.download_button(
             label="Download Final Edited Text (.txt)",
             data=final_edited_text,
-            file_name=OUTPUT_FILENAME,
+            file_name=f"{OUTPUT_FILENAME}.txt",
             mime="text/plain"
         )
 
