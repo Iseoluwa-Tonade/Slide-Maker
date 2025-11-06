@@ -188,6 +188,9 @@ def main_app():
     # --- Initialize Session State ---
     if 'editing_started' not in st.session_state: st.session_state['editing_started'] = False
     if 'editor_text' not in st.session_state: st.session_state['editor_text'] = ""
+    # Store the original file buffer and the shape map for editing functions
+    if 'original_file_buffer' not in st.session_state: st.session_state['original_file_buffer'] = None
+    if 'shape_map' not in st.session_state: st.session_state['shape_map'] = None
 
     st.title("📄 AI PowerPoint (PPTX) Automation Tool")
     st.markdown("Upload your **.pptx** template and paste a meeting transcript to automatically update the text.")
@@ -207,7 +210,8 @@ def main_app():
     # 2. Execution Button
     if st.button("Start Analysis and Editing 🚀", disabled=(not uploaded_file or not transcript or not API_KEY)):
         try:
-            prs = Presentation(io.BytesIO(uploaded_file.getvalue()))
+            file_buffer = uploaded_file.getvalue()
+            prs = Presentation(io.BytesIO(file_buffer))
         except Exception as e:
             st.error(f"Could not load presentation: {e}")
             return
@@ -231,7 +235,7 @@ def main_app():
             edit_block_output.append(formatted_line)
         
         st.session_state['editor_text'] = "\n".join(edit_block_output)
-        st.session_state['prs_buffer'] = io.BytesIO(uploaded_file.getvalue()) # Store original buffer
+        st.session_state['original_file_buffer'] = file_buffer # Store original buffer
         st.session_state['shape_map'] = shape_map
         st.session_state['editing_started'] = True
         
@@ -249,33 +253,43 @@ def main_app():
             """
         )
 
+        # The text area value should always reflect the session state
         edited_block_text = st.text_area(
-            "Copy, Edit, and Paste Back (if needed):",
+            "Review and Edit Text:",
             value=st.session_state['editor_text'],
             height=600,
             key='batch_edit_area'
         )
         
-        # Update session state as user types
+        # Update session state whenever the text area content changes
         st.session_state['editor_text'] = edited_block_text
 
         st.markdown("---")
         
         col_preview, col_final = st.columns(2)
 
+        def generate_pptx_output(is_final=False):
+            """Applies all edits and returns the PPTX file buffer."""
+            # 1. Re-load the original PPTX file from the session buffer (clean state)
+            prs = Presentation(io.BytesIO(st.session_state['original_file_buffer']))
+            shape_map = st.session_state['shape_map']
+            edited_block_lines = st.session_state['editor_text'].split('\n')
+            
+            # 2. Apply all edits to the clean PPTX object
+            with st.spinner("Applying changes..."):
+                process_batch_edits(prs, edited_block_lines, shape_map)
+
+            # 3. Save the modified PPTX object to a new buffer
+            output_buffer = io.BytesIO()
+            prs.save(output_buffer)
+            output_buffer.seek(0)
+            return output_buffer
+
         with col_preview:
-            if st.button("Generate Preview File", help="Apply changes and download a copy to check your work."):
-                prs = Presentation(st.session_state['prs_buffer']) # Re-load original
-                shape_map = st.session_state['shape_map']
-                edited_block_lines = st.session_state['editor_text'].split('\n')
+            # We use a non-default key to avoid the "already in session state" warning
+            if st.button("Generate Preview File", help="Apply changes and download a copy to check your work.", key='preview_btn'):
+                output_buffer = generate_pptx_output(is_final=False)
                 
-                with st.spinner("Applying changes for preview..."):
-                    process_batch_edits(prs, edited_block_lines, shape_map)
-
-                output_buffer = io.BytesIO()
-                prs.save(output_buffer)
-                output_buffer.seek(0)
-
                 st.download_button(
                     label="⬇️ Download Preview File",
                     data=output_buffer,
@@ -285,17 +299,8 @@ def main_app():
                 )
 
         with col_final:
-            if st.button("✅ Apply Final Changes and Download", type="primary"):
-                prs = Presentation(st.session_state['prs_buffer']) # Re-load original
-                shape_map = st.session_state['shape_map']
-                edited_block_lines = st.session_state['editor_text'].split('\n')
-                
-                with st.spinner("Applying final changes..."):
-                    process_batch_edits(prs, edited_block_lines, shape_map)
-
-                output_buffer = io.BytesIO()
-                prs.save(output_buffer)
-                output_buffer.seek(0)
+            if st.button("✅ Apply Final Changes and Download", type="primary", key='final_btn'):
+                output_buffer = generate_pptx_output(is_final=True)
                 
                 st.success(f"✅ Success! Your file is ready.")
                 st.download_button(
