@@ -4,133 +4,41 @@ import json
 import time
 import requests
 import io
-from pptx import Presentation
-from pptx.enum.dml import MSO_COLOR_TYPE
-from pptx.enum.text import PP_ALIGN
+import sys
+
+# New library for PDF reading
+try:
+    from pypdf import PdfReader
+except ImportError:
+    st.error("Missing 'pypdf' library. Please add it to requirements.txt.")
+    sys.exit()
 
 # --- Configuration ---
-# Set the default name for the output file
-OUTPUT_FILENAME = "edited_presentation.pptx"
+OUTPUT_FILENAME = "edited_text_output.txt"
+# This file name is for the initial PDF upload only
+PDF_INPUT_FILENAME = "input_document.pdf" 
 
-# --- LLM API Configuration (Read from Streamlit Secrets/Environment) ---
-# NOTE: The value of this key will be read securely from Streamlit's environment settings.
+# --- LLM API Configuration ---
 API_KEY = os.environ.get("GEMINI_API_KEY")
-
-# Model and API endpoint for structured JSON output
-API_URL_JSON = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={API_KEY}"
-# A separate endpoint/config for simple text generation
 API_URL_TEXT = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={API_KEY}"
 
-# --- CORE LOGIC FUNCTIONS (Adapted for Streamlit) ---
-
-def apply_text_formatting(target_run, source_font):
-    """Reapplies font size, name, bold, and color from source_font to target_run."""
-    if source_font:
-        # 1. Size and Name
-        if source_font.size: target_run.font.size = source_font.size
-        if source_font.name: target_run.font.name = source_font.name
-        target_run.font.bold = source_font.bold
-
-        # 2. Color Preservation Logic
-        color_type = source_font.color.type
-        if color_type == MSO_COLOR_TYPE.RGB:
-            target_run.font.color.rgb = source_font.color.rgb
-        elif color_type == MSO_COLOR_TYPE.SCHEME:
-            target_run.font.color.theme_color = source_font.color.theme_color
-            if hasattr(source_font.color, 'brightness') and source_font.color.brightness is not None:
-                target_run.font.color.brightness = source_font.color.brightness
-
-def replace_text_safely(shape, new_text):
-    """Replaces text in a shape while preserving the formatting of the first run."""
-    text_frame = shape.text_frame
-
-    if not text_frame.paragraphs:
-        p0 = text_frame.add_paragraph()
-    else:
-        p0 = text_frame.paragraphs[0]
-
-    r0 = p0.runs[0].font if p0.runs else None
-
-    original_alignment = p0.alignment
-    original_level = p0.level
-
-    while len(text_frame.paragraphs) > 1:
-        p = text_frame.paragraphs[-1]
-        if hasattr(p, '_element'):
-            p._element.getparent().remove(p._element)
-        else:
-            break
-    p0.clear()
-
-    new_lines = new_text.split('\n')
-
-    if new_lines:
-        run = p0.add_run()
-        run.text = new_lines[0]
-        p0.alignment = original_alignment
-        p0.level = original_level
-        apply_text_formatting(run, r0)
-
-        for line in new_lines[1:]:
-            p = text_frame.add_paragraph()
-            p.text = line
-            p.level = original_level
-            p.alignment = original_alignment
-
-            if p.runs:
-                apply_text_formatting(p.runs[0], r0)
-
-def extract_presentation_text_blocks(prs):
-    """
-    Scans the presentation and returns a numbered list of all non-empty text blocks
-    and a mapping to their original shape objects.
-    """
-    presentation_blocks = []
-    shape_map = []
-
-    for slide_idx, slide in enumerate(prs.slides):
-        for shape in slide.shapes:
-            if shape.has_text_frame:
-                current_text = "\n".join(p.text for p in shape.text_frame.paragraphs if p.text.strip())
-
-                if current_text.strip():
-                    presentation_blocks.append({
-                        "id": len(presentation_blocks),
-                        "slide_number": slide_idx + 1,
-                        "current_text": current_text,
-                        "shape_name": shape.name,
-                    })
-                    shape_map.append(shape)
-
-    return presentation_blocks, shape_map
+# --- CORE LOGIC FUNCTIONS ---
 
 def call_gemini_api(url, payload):
     """Helper function to call the Gemini API with retry logic."""
     max_retries = 3
-    delay = 2 # seconds
-
+    delay = 2 
     for attempt in range(max_retries):
         try:
             response = requests.post(url, headers={'Content-Type': 'application/json'}, data=json.dumps(payload))
             response.raise_for_status()
-
             result = response.json()
-
-            if 'candidates' not in result or not result['candidates']:
-                 return None
-
-            json_text = result['candidates'][0]['content']['parts'][0]['text']
-
-            if not json_text:
-                 return None
-
-            return json_text
-
+            if 'candidates' not in result or not result['candidates']: return None
+            text = result['candidates'][0]['content']['parts'][0]['text']
+            return text
         except requests.exceptions.HTTPError as e:
-            # Handle 400 errors (like token limits) specifically
             st.error(f"API Error (Attempt {attempt + 1}): {e.response.status_code}")
             if attempt < max_retries - 1:
-                st.info(f"Retrying in {delay} seconds...")
                 time.sleep(delay)
                 delay *= 2
             else:
@@ -141,241 +49,159 @@ def call_gemini_api(url, payload):
             raise
     return None
 
-@st.cache_data(show_spinner=False)
-def generate_ai_mapping(_transcript, presentation_blocks, api_key):
-    """
-    Calls the Gemini API to analyze the transcript and map the extracted data
-    to the most appropriate existing text blocks. Caches result based on transcript hash.
-    """
-    if not api_key:
-        st.error("Gemini API Key is not configured.")
-        return []
+def extract_text_from_pdf(pdf_buffer):
+    """Reads PDF buffer and returns all text, separated by page markers."""
+    reader = PdfReader(pdf_buffer)
+    all_text = []
+    for i, page in enumerate(reader.pages):
+        all_text.append(f"--- PAGE {i + 1} START ---")
+        all_text.append(page.extract_text() or " [No Text Extracted on this page] ")
+        all_text.append(f"--- PAGE {i + 1} END ---")
+        all_text.append("")
+    return "\n".join(all_text)
 
-    # Use the API URL defined globally
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={api_key}"
+def generate_ai_suggestions(transcript, extracted_text):
+    """Calls Gemini to rewrite the extracted PDF text based on the transcript."""
+    st.info("🧠 AI is analyzing the PDF text and transcript for suggested edits...")
 
-    # --- Truncate long transcripts to avoid token limits ---
     MAX_TRANSCRIPT_LENGTH = 8000
-    transcript_to_send = _transcript
-    if len(_transcript) > MAX_TRANSCRIPT_LENGTH:
-        head = _transcript[:4000]
-        tail = _transcript[-4000:]
+    if len(transcript) > MAX_TRANSCRIPT_LENGTH:
+        head = transcript[:4000]
+        tail = transcript[-4000:]
         transcript_to_send = f"{head}\n\n[... TRANSCRIPT TRUNCATED ...]\n\n{tail}"
-
-    schema = {
-        "type": "ARRAY",
-        "description": "A list of text replacements. Only include blocks that require an update based on the transcript.",
-        "items": {
-            "type": "OBJECT",
-            "properties": {
-                "original_index": {"type": "NUMBER", "description": "The 'id' number of the text block to replace from the PRESENTATION TEXT BLOCKS list."},
-                "new_text": {"type": "STRING", "description": "The concise, new text or bulleted content derived from the transcript. Use '\\n' for new lines/bullets."}
-            },
-            "required": ["original_index", "new_text"]
-        }
-    }
+    else:
+        transcript_to_send = transcript
 
     system_prompt = (
-        "You are a Presentation Automation Specialist. Analyze the TRANSCRIPT and the PRESENTATION TEXT BLOCKS. "
-        "Your goal is to replace the generic or outdated text in the presentation with key concepts, data, and next steps "
-        "from the transcript. You must use the provided JSON schema. "
-        "Only create entries for text blocks that need modification. Do NOT create entries for blocks that should remain unchanged. "
-        "Ensure the 'new_text' is ready for direct insertion into a PowerPoint slide."
+        "You are a document editor. Your task is to rewrite the 'ORIGINAL PDF TEXT' "
+        "to reflect the key decisions and content from the 'MEETING TRANSCRIPT'. "
+        "Maintain the original structure and page markers (--- PAGE X START ---). "
+        "Only update sections that are relevant to the transcript. Provide ONLY the final rewritten text."
     )
 
-    presentation_list_text = json.dumps(presentation_blocks, indent=2)
     user_query = (
         f"MEETING TRANSCRIPT:\n---\n{transcript_to_send}\n---\n\n"
-        f"PRESENTATION TEXT BLOCKS (Index to Map to):\n---\n{presentation_list_text}\n---\n"
-        "Generate a JSON array of objects mapping the 'original_index' to the derived 'new_text'."
+        f"ORIGINAL PDF TEXT (Maintain Structure/Page Markers):\n---\n{extracted_text}\n---\n"
+        "Provide the final, fully edited document text:"
     )
 
     payload = {
         "contents": [{"parts": [{"text": user_query}]}],
-        "systemInstruction": {"parts": [{"text": system_prompt}]},
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "responseSchema": schema
-        }
+        "systemInstruction": {"parts": [{"text": system_prompt}]}
     }
 
-    with st.spinner("Analyzing transcript and mapping changes with Gemini..."):
-        json_text = call_gemini_api(url, payload)
+    with st.spinner("Rewriting document content..."):
+        return call_gemini_api(API_URL_TEXT, payload)
 
-    if json_text:
-        return json.loads(json_text)
-    return []
-
-def process_batch_edits(prs, edited_block_lines, presentation_blocks, shape_map):
-    """Parses the bulk edited text block and applies changes."""
-    applied_count = 0
-
-    for line in edited_block_lines:
-        try:
-            match = line.split('|', 3)
-            if len(match) < 4:
-                continue
-
-            id_str = match[0].strip()[1:]
-            block_id = int(id_str.split('|')[0])
-
-            new_text_raw = match[3].strip()
-            # Unescape newlines
-            new_text = new_text_raw.replace(' \\n ', '\n').replace('\\n', '\n')
-
-            if 0 <= block_id < len(shape_map):
-                shape = shape_map[block_id]
-
-                if not new_text.strip():
-                    new_text = ""
-
-                replace_text_safely(shape, new_text)
-                applied_count += 1
-
-        except Exception as e:
-            st.warning(f"Could not parse or apply change for line: {line}. Skipping. Error: {e}")
-
-    return applied_count
 
 # --- STREAMLIT UI ---
 
 def main_app():
-    st.set_page_config(layout="wide", page_title="PPTX AI Co-Editor")
+    st.set_page_config(layout="wide", page_title="PDF AI Co-Editor")
 
-    st.title("📄 AI PowerPoint Automation Tool")
-    st.markdown("Upload your PowerPoint template and paste a meeting transcript to automatically update the text.")
+    st.title("📄 PDF AI Co-Editor (Visual Reference Strategy)")
+    st.markdown("This tool extracts text from your PDF, lets you edit it with AI help, and provides the final edited text.")
 
     if not API_KEY:
-        st.error("⚠️ **Deployment Error:** The `GEMINI_API_KEY` environment variable is not set. Please configure it for the AI modes to function.")
+        st.error("⚠️ **Deployment Error:** The `GEMINI_API_KEY` environment variable is not set.")
 
-    # 1. File Uploader and Transcript Input
-    col1, col2 = st.columns([1, 1])
-
-    with col1:
-        uploaded_file = st.file_uploader(
-            "Upload PowerPoint File (.pptx)",
-            type="pptx",
-            help="Your existing presentation template."
+    # 1. Inputs: PDF, Visual Reference Image, and Transcript
+    st.subheader("1. Upload Files and Transcript")
+    
+    col_file, col_visual = st.columns(2)
+    
+    with col_file:
+        uploaded_pdf = st.file_uploader(
+            "Upload Target PDF Document",
+            type="pdf",
+            key='uploaded_pdf'
+        )
+    
+    with col_visual:
+        uploaded_image = st.file_uploader(
+            "Upload Visual Reference (PNG/JPEG image of the page/slide)",
+            type=["png", "jpg", "jpeg"],
+            key='uploaded_image',
+            help="Upload a screenshot of the page for live visual context while editing."
         )
 
-    with col2:
-        transcript = st.text_area(
-            "Paste Meeting Transcript Here",
-            height=300,
-            help="The AI will use this text to update your slides."
-        )
-
-    st.markdown("---")
-
-    # 2. Mode Selection (Simplified for Web)
-    mode = st.radio(
-        "Select Editing Mode:",
-        options=[
-            "Batch Edit & Apply (Recommended)",
-            "AI Guided Review",
-        ],
-        horizontal=True,
-        index=0,
-        key='edit_mode'
+    transcript = st.text_area(
+        "Paste Meeting Transcript Here",
+        height=200,
+        key='transcript_area'
     )
 
-    # 3. Execution Button
-    if st.button("Start Analysis and Editing 🚀", disabled=(not uploaded_file or not transcript or not API_KEY)):
-
-        # Load the presentation file into a buffer
-        try:
-            prs = Presentation(io.BytesIO(uploaded_file.read()))
-        except Exception as e:
-            st.error(f"Could not load presentation: {e}")
-            return
-
-        # Extract text blocks and map to shapes
-        presentation_blocks, shape_map = extract_presentation_text_blocks(prs)
-        if not presentation_blocks:
-            st.warning("No editable text blocks found in the presentation. Please check your template.")
-            return
-
-        # Generate AI Mapping (Cached)
-        ai_mapping_list = generate_ai_mapping(transcript, presentation_blocks, API_KEY)
-        ai_replacements = {item['original_index']: item['new_text'] for item in ai_mapping_list}
-
-        st.session_state['prs'] = prs
-        st.session_state['presentation_blocks'] = presentation_blocks
-        st.session_state['shape_map'] = shape_map
-        st.session_state['ai_replacements'] = ai_replacements
-        st.session_state['editing_started'] = True
-
-        # Force a rerun to show the editing interface below
-        st.rerun()
+    st.markdown("---")
+    
+    # 2. Execution Button
+    if st.button("Start Analysis and Editing 🚀", disabled=(not uploaded_pdf or not transcript or not API_KEY)):
+        if uploaded_pdf:
+            st.session_state['pdf_buffer'] = uploaded_pdf.getvalue()
+            
+            with st.spinner("Extracting text from PDF..."):
+                extracted_text = extract_text_from_pdf(io.BytesIO(st.session_state['pdf_buffer']))
+                st.session_state['extracted_text'] = extracted_text
+                
+            st.session_state['editing_started'] = True
+            st.session_state['ai_suggestion'] = generate_ai_suggestions(transcript, extracted_text)
+            
+            # Use AI suggestion as the initial text for the editor if available
+            st.session_state['editor_text'] = st.session_state.get('ai_suggestion', extracted_text)
+            
+            st.rerun()
 
     # --- Editing Interface (Runs after analysis is complete) ---
-    if 'editing_started' in st.session_state and st.session_state['editing_started']:
+    if st.session_state.get('editing_started'):
+        st.subheader("2. Live Visual Reference & Text Editing")
 
-        prs = st.session_state['prs']
-        presentation_blocks = st.session_state['presentation_blocks']
-        ai_replacements = st.session_state['ai_replacements']
-        shape_map = st.session_state['shape_map']
+        col_visual_ref, col_editor = st.columns(2)
 
-        st.header(f"Editing Interface ({mode})")
-        st.info(f"AI suggested **{len(ai_replacements)}** blocks for replacement.")
+        # A. Visual Reference (The "Live Preview" replacement)
+        with col_visual_ref:
+            if uploaded_image:
+                st.image(uploaded_image, caption="Visual Reference (Live Preview)", use_column_width=True)
+            else:
+                st.warning("Upload a visual image to get a live reference while editing.")
+                st.info("The text is organized by page markers (--- PAGE X START ---).")
 
-        # Batch Edit & Apply Mode (Mode 3 logic)
-        if mode == "Batch Edit & Apply (Recommended)":
-
-            # Generate the Comprehensive Edit Block
-            edit_block_output = []
-            for block in presentation_blocks:
-                original_index = block['id']
-                slide_num = block['slide_number']
-
-                if original_index in ai_replacements:
-                    initial_text = ai_replacements[original_index].replace("\\n", "\n")
-                    indicator = "AI_SUGGESTED"
-                else:
-                    initial_text = block['current_text']
-                    indicator = "ORIGINAL_TEXT"
-
-                # Using ' | ' delimiter for easy parsing
-                formatted_line = f"[{original_index}|S{slide_num}|{indicator}] | {initial_text.replace('\n', ' \\n ')}"
-                edit_block_output.append(formatted_line)
-
-            st.markdown(
-                """
-                ### 📝 Step 1: Bulk Edit
-                Copy the entire text block below. Edit **ONLY** the text content after the last `|` delimiter. 
-                Use `\\n` for new lines or bullet points.
-                """
-            )
-
-            edited_block_text = st.text_area(
-                "Copy, Edit, and Paste Back:",
-                value="\n".join(edit_block_output),
+        # B. Text Editor
+        with col_editor:
+            
+            # Display AI suggestion status
+            if 'ai_suggestion' in st.session_state:
+                st.success("✅ AI has analyzed the transcript and generated suggested edits.")
+            else:
+                st.info("Editing original extracted text.")
+                
+            # Allow user to edit the text
+            final_edited_text = st.text_area(
+                "Final Edited Document Text (Review/Modify below):",
+                value=st.session_state['editor_text'],
                 height=600,
-                key='batch_edit_area'
+                key='final_editor'
             )
 
-            if st.button("Apply Batch Changes and Generate File"):
-                edited_block_lines = edited_block_text.split('\n')
-                with st.spinner("Applying changes..."):
-                    applied_count = process_batch_edits(prs, edited_block_lines, presentation_blocks, shape_map)
+        st.markdown("---")
 
-                # Save to a bytes buffer
-                output_buffer = io.BytesIO()
-                prs.save(output_buffer)
-                output_buffer.seek(0)
+        # 3. Final Output Button
+        st.subheader("3. Final Output")
+        
+        # Download button provides the final text output
+        st.download_button(
+            label="Download Final Edited Text (.txt)",
+            data=final_edited_text,
+            file_name=OUTPUT_FILENAME,
+            mime="text/plain"
+        )
+        st.info("The output is a plain text file. Use this text to manually recreate your final PDF document.")
 
-                st.success(f"✅ Success! Applied {applied_count} changes. Your file is ready for download.")
-                st.download_button(
-                    label=f"Download {OUTPUT_FILENAME}",
-                    data=output_buffer,
-                    file_name=OUTPUT_FILENAME,
-                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
-                )
-
-        # AI Guided Review Mode (Mode 2 logic)
-        elif mode == "AI Guided Review":
-            st.warning("Interactive review logic is complex for Streamlit's stateless nature. Please use the Batch Edit mode, which provides maximum control in a web environment.")
-
-# Run the main app function
 if __name__ == "__main__":
+    # Ensure 'requests' is available for the API call
+    if 'requests' not in sys.modules:
+        try:
+            import requests
+        except ImportError:
+            # This is handled during initial deployment with requirements.txt
+            pass
+
     main_app()
