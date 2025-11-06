@@ -140,7 +140,13 @@ def generate_ai_mapping(_transcript, presentation_blocks, api_key):
 
     system_prompt = "You are a Presentation Automation Specialist. Analyze the TRANSCRIPT and the PRESENTATION TEXT BLOCKS. Only create entries for blocks that need modification."
     presentation_list_text = json.dumps(presentation_blocks, indent=2)
-    user_query = f"MEETING TRANSCRIPT:\n---\n{transcript_to_send}\n---\n\NPRESENTATION TEXT BLOCKS (Index to Map to):\n---\n{presentation_list_text}\n---\nGenerate a JSON array of objects mapping the 'original_index' to the derived 'new_text'."
+    
+    # FIX: Use safe string concatenation to avoid Unicode escape error
+    user_query = (
+        f"MEETING TRANSCRIPT:\n---\n{transcript_to_send}\n---\n"
+        f"PRESENTATION TEXT BLOCKS (Index to Map to):\n---\n{presentation_list_text}\n---\n"
+        f"Generate a JSON array of objects mapping the 'original_index' to the derived 'new_text'."
+    )
 
     payload = {
         "contents": [{"parts": [{"text": user_query}]}],
