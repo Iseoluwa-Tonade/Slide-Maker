@@ -153,6 +153,14 @@ def generate_edited_image(image_buffer, edited_text):
 def main_app():
     st.set_page_config(layout="wide", page_title="Document AI Co-Editor")
 
+    # --- Initialize Session State (Fixes KeyError on initial load) ---
+    if 'editing_started' not in st.session_state: st.session_state['editing_started'] = False
+    if 'document_type' not in st.session_state: st.session_state['document_type'] = 'None'
+    # The crucial fix for the image buffer key error:
+    if 'original_image_buffer' not in st.session_state: st.session_state['original_image_buffer'] = None
+    if 'editor_text' not in st.session_state: st.session_state['editor_text'] = ""
+    # ------------------------------------------------------------------
+
     st.title("📄 AI Image & Document Editor (Re-render Text)")
     st.markdown("Upload an image or document, and the AI will extract, edit, and re-render the content based on your transcript.")
 
@@ -190,6 +198,8 @@ def main_app():
         if file_type == 'application/pdf':
             extracted_text = extract_text_from_pdf(io.BytesIO(file_buffer))
             st.session_state['document_type'] = 'PDF'
+            # PDF doesn't have an original image buffer for re-rendering
+            st.session_state['original_image_buffer'] = None 
         elif file_type in ['image/png', 'image/jpeg']:
             extracted_text = extract_text_from_image(file_buffer, file_type)
             st.session_state['document_type'] = 'Image'
@@ -221,6 +231,8 @@ def main_app():
             if 'ai_suggestion' in st.session_state:
                 st.success("✅ AI has generated suggested edits.")
             
+            # Allow user to edit the text
+            # We use the key 'final_editor' to keep the text persistent
             final_edited_text = st.text_area(
                 "Final Edited Text (Review/Modify below):",
                 value=st.session_state['editor_text'],
@@ -228,14 +240,17 @@ def main_app():
                 key='final_editor'
             )
             
-            # Update session state text whenever the user types
+            # Update session state text whenever the user types/the editor value changes
             st.session_state['editor_text'] = final_edited_text
 
         # B. Output Visuals & Re-render Button
         with col_visual_output:
             st.warning("Preview/Re-render Area")
 
-            if document_type == 'Image':
+            if document_type == 'Image' and st.session_state['original_image_buffer']:
+                # Show the original image as a reference
+                st.image(st.session_state['original_image_buffer'], caption="Original Image Reference", use_container_width=True)
+                
                 if st.button("🖼️ Generate Edited Image Output", key='generate_image_button'):
                     # The image generation function uses the text currently in the editor
                     image_base64_data = generate_edited_image(
@@ -246,7 +261,7 @@ def main_app():
                     if image_base64_data:
                         # Display the new image and allow download
                         image_url = f"data:image/jpeg;base64,{image_base64_data}"
-                        st.image(image_url, caption="AI Re-rendered Image Output", use_column_width=True)
+                        st.image(image_url, caption="AI Re-rendered Image Output", use_container_width=True)
                         st.download_button(
                             label="Download Re-rendered Image",
                             data=base64.b64decode(image_base64_data),
@@ -255,10 +270,10 @@ def main_app():
                         )
             
             elif document_type == 'PDF':
-                st.info("PDF: Output is text only. Please click the button below to download the final edited text.")
+                st.info("PDF: Output is text only. No image re-rendering is possible.")
             
             else:
-                st.warning("No visual output for this file type.")
+                st.warning("No visual output available.")
 
         st.markdown("---")
 
@@ -267,17 +282,10 @@ def main_app():
         
         st.download_button(
             label="Download Final Edited Text (.txt)",
-            data=final_edited_text,
+            data=st.session_state['editor_text'],
             file_name=f"{OUTPUT_FILENAME}.txt",
             mime="text/plain"
         )
 
 if __name__ == "__main__":
-    # Ensure 'requests' is available for the API call
-    if 'requests' not in sys.modules:
-        try:
-            import requests
-        except ImportError:
-            pass
-
     main_app()
